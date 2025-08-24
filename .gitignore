@@ -217,7 +217,7 @@ env/
 # Data (use DVC instead)
 !data/**/*.dvc
 !data/.gitignore
-data/
+data/raw/tintanic.csv
 models/
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
