@@ -1,114 +1,135 @@
 “End Term Project: Robust MLOps Pipeline (ID5003W, IITM)”
 #  Titanic Survival Prediction (MLOps Project)
+This project demonstrates an end-to-end ML pipeline for Titanic survival prediction using Apache Spark, MLflow, DVC, FastAPI, and Docker. The pipeline is automated, reproducible, and production-ready, including drift detection and model versioning.
 
-This project demonstrates an **end-to-end ML pipeline** with:
-- Data preprocessing (Spark)
-- Model training & hyperparameter tuning (Spark MLlib)
-- Experiment tracking & model registry (MLflow + SQLite backend)
-- FastAPI service for inference
-- Optional Docker containerization
-
----
-
-## Project Structure
-├── configs/ # Configuration files (optional)
-├── data/
-│ ├── raw/ # Raw datasets (titanic.csv, not in Git)
-│ └── processed/ # Processed data + stats (ignored in Git)
-├── notebooks/ # Jupyter notebooks for exploration
-├── reports/ # Reports, plots, artifacts
+Directory Structure
+mlops-pipeline-ch24m535/
 ├── src/
-│ ├── data_pipeline.py # Spark preprocessing pipeline
-│ ├── train.py # Model training + MLflow logging
-│ ├── app.py # FastAPI serving
-│ ├── test_script.py # Simple API test
-│ └── ...
+│   ├── preprocess.py
+│   ├── train.py
+│   ├── app.py
+│   ├── utils.py
+│   └── config.py
+├── tests/
+│   ├── test_script.py
+│   └── test.csv
+├── data/
+│   ├── raw/           # Large datasets (DVC tracked)
+│   └── processed/     # Processed datasets (DVC tracked)
+├── Dockerfile
+├── Makefile
 ├── requirements.txt
-└── README.md
+├── README.md
+├── .gitignore
+└── report/
+    └── Titanic_ML_Pipeline.pdf
+
+Setup
+
+Clone the repository:
+
+git clone <your_repo_url>
+cd mlops-pipeline-ch24m535
 
 
----
+Create and activate Python environment:
 
-## ⚙️ Setup
-
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/<your-username>/titanic-mlops.git
-   cd titanic-mlops
-2. Create a conda/venv environment:
-conda create -n titanic python=3.9
-conda activate titanic
+conda create -n bigdl_class python=3.7 -y
+conda activate bigdl_class
 pip install -r requirements.txt
-3.(Optional) Setup MLflow UI locally:
-
-mlflow ui --backend-store-uri sqlite:///mlflow.db
-
-# Data Pipeline
-
-Run preprocessing (imputation, encoding, feature engineering):
-
-python src/data_pipeline.py
 
 
-This generates:
+Initialize DVC (if not already):
 
-data/processed/titanic/ (parquet)
-
-data/processed/impute_stats.json
-
-models/preprocess_pipeline/
-
-# Training
-
-Train + track models with MLflow:
-
-python src/train.py
+dvc pull
 
 
-Artifacts logged to MLflow:
+This will download the raw and processed data tracked by DVC.
 
-Metrics: AUC, Accuracy, Precision, Recall, F1
+Makefile Commands
+Command	Description
+make preprocess	Run data preprocessing (src/preprocess.py)
+make train	Train models and log to MLflow (src/train.py)
+make serve	Launch FastAPI app (src/app.py) on port 8000
+make test	Run tests/test_script.py on sample test.csv
 
-Confusion matrix
+Example:
 
-Feature importances / coefficients
+make preprocess
+make train
+make serve
+make test
 
-Registered model: TitanicClassifier
+FastAPI App Usage
 
-# Serving (FastAPI)
+Launch API:
 
-Run the API:
-
-uvicorn src.app:app --reload
-
-
-Endpoints:
-
-GET / → Healthcheck
-
-POST /predict → Predict survival from passenger features
-
-Example request:
-
-curl -X POST "http://127.0.0.1:8000/predict" \
-  -H "Content-Type: application/json" \
-  -d '{"Pclass": 3, "Sex": "male", "Age": 22, "Fare": 7.25, "Embarked": "S"}'
+uvicorn src.app:app --reload --port 8000
 
 
-Response:
+Test API using test_script.py:
+
+python tests/test_script.py --input tests/test.csv
+
+
+Response format:
 
 {
-  "survived": 0,
-  "probability_survive": 0.0532
+  "survived": 1,
+  "probability_survive": 0.834,
+  "drift_alerts": "No drift detected"
 }
 
-# Docker (Optional)
 
-Build image:
+Note: test_script.py can take any CSV of passenger data as input.
 
-docker build -t titanic-api .
+MLflow
+
+Launch MLflow UI:
+
+mlflow ui
+
+
+Track experiment metrics, registered model versions, and artifacts like ROC curves and confusion matrices.
+
+Docker Usage
+
+Build Docker image:
+
+docker build -t titanic-ml-pipeline .
 
 
 Run container:
 
-docker run -p 8000:8000 titanic-api
+docker run -p 8000:8000 titanic-ml-pipeline
+
+
+Access API at:
+
+http://127.0.0.1:8000/predict
+
+Testing Procedure
+
+Use tests/test.csv to validate your pipeline after deployment.
+
+tests/test_script.py selects random rows and sends POST requests to /predict.
+
+Can be extended for automated regression testing or CI/CD pipelines.
+
+Future Work
+
+Add CI/CD for retraining and deployment.
+
+Advanced drift detection (KL divergence, adaptive thresholds).
+
+Multi-model ensemble learning.
+
+References
+
+MLflow
+
+DVC
+
+FastAPI
+
+PySpark
