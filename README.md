@@ -39,4 +39,76 @@ This project demonstrates an **end-to-end ML pipeline** with:
 conda create -n titanic python=3.9
 conda activate titanic
 pip install -r requirements.txt
+3.(Optional) Setup MLflow UI locally:
 
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+
+# Data Pipeline
+
+Run preprocessing (imputation, encoding, feature engineering):
+
+python src/data_pipeline.py
+
+
+This generates:
+
+data/processed/titanic/ (parquet)
+
+data/processed/impute_stats.json
+
+models/preprocess_pipeline/
+
+# Training
+
+Train + track models with MLflow:
+
+python src/train.py
+
+
+Artifacts logged to MLflow:
+
+Metrics: AUC, Accuracy, Precision, Recall, F1
+
+Confusion matrix
+
+Feature importances / coefficients
+
+Registered model: TitanicClassifier
+
+# Serving (FastAPI)
+
+Run the API:
+
+uvicorn src.app:app --reload
+
+
+Endpoints:
+
+GET / → Healthcheck
+
+POST /predict → Predict survival from passenger features
+
+Example request:
+
+curl -X POST "http://127.0.0.1:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{"Pclass": 3, "Sex": "male", "Age": 22, "Fare": 7.25, "Embarked": "S"}'
+
+
+Response:
+
+{
+  "survived": 0,
+  "probability_survive": 0.0532
+}
+
+# Docker (Optional)
+
+Build image:
+
+docker build -t titanic-api .
+
+
+Run container:
+
+docker run -p 8000:8000 titanic-api
