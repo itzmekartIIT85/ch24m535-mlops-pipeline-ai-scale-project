@@ -1,9 +1,8 @@
 """
 train.py — distributed training (Spark ML) + HPO + MLflow tracking + model registry
-- Loads processed Titanic parquet (must include 'features' column)
-- Grid-search over candidate estimators (LogReg, RandomForest)
-- Logs params, AUC, confusion matrix, feature importance/coefficients to MLflow
-- Registers best run to MLflow Model Registry (fallback: local save)
+
+Usage:
+    python train.py --processed_dir /path/to/processed
 """
 
 import os
@@ -21,6 +20,8 @@ from pyspark.ml.evaluation import BinaryClassificationEvaluator
 from pyspark.ml import Pipeline
 
 # extra libs for artifacts
+import matplotlib
+matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -62,7 +63,7 @@ def save_feature_table(feat_names, values, csv_path):
 # ----------------------
 # Main
 # ----------------------
-def main():
+def main(processed_dir: str):
     spark = None
     try:
         mlflow.set_tracking_uri("sqlite:///mlflow.db")
@@ -71,33 +72,21 @@ def main():
         spark = SparkSession.builder.appName("TitanicTraining").getOrCreate()
 
         # load processed data (must have 'features' col)
-        processed_path = "/home/karthik/mlops-pipeline-ch24m535/data/processed/titanic"
-        try:
-            df = spark.read.parquet(processed_path)
-            print(f" Loaded processed data: {df.count()} rows")
-        except Exception as e:
-            print(f" Error loading processed data at {processed_path}: {e}")
-            return
+        processed_path = os.path.join(processed_dir, "titanic")
+        if not os.path.exists(processed_path):
+            raise FileNotFoundError(f"Processed data not found: {processed_path}")
 
-        # Try to load exact feature names produced by preprocessing.
-        # preprocess.py can write a feature_names.json file listing assembler inputCols in order.
-        feature_names_file = os.path.join(os.path.dirname(processed_path), "feature_names.json")
-        feature_names = None
+        df = spark.read.parquet(processed_path)
+        print(f"Loaded processed data: {df.count()} rows")
+
+        # Load feature names
+        feature_names_file = os.path.join(processed_dir, "feature_names.json")
         if os.path.exists(feature_names_file):
-            try:
-                feature_names = json.load(open(feature_names_file, "r"))
-                print("Loaded feature names from feature_names.json")
-            except Exception as e:
-                print("Could not load feature_names.json:", e)
-                feature_names = None
-
-        # If not available, infer heuristically (best-effort)
-        inferred_feat_names = ["Pclass", "SexIndexed", "Age", "Fare", "EmbarkedIndexed"]
-        if feature_names is None:
-            feature_names = inferred_feat_names
-            print("Inferred feature names (heuristic):", feature_names)
+            feature_names = json.load(open(feature_names_file, "r"))
+            print("Loaded feature names from feature_names.json")
         else:
-            print("Feature names (from file):", feature_names)
+            feature_names = ["Pclass", "SexIndexed", "Age", "Fare", "EmbarkedIndexed"]
+            print("Feature names not found, using default:", feature_names)
 
         # train/test split
         train, test = df.randomSplit([0.8, 0.2], seed=42)
@@ -108,25 +97,15 @@ def main():
             metricName="areaUnderROC"
         )
 
-        mlflow.set_experiment("Titanic_Classification")
-
-        # ---------------------------
-        # Candidate models + params
-        # ---------------------------
+        # Candidate models + hyperparams
         model_candidates = {
             "LogisticRegression": {
                 "estimator": LogisticRegression(labelCol="Survived", featuresCol="features"),
-                "params": {
-                    "maxIter": [10, 20],
-                    "regParam": [0.0, 0.1]
-                }
+                "params": {"maxIter": [10, 20], "regParam": [0.0, 0.1]}
             },
             "RandomForest": {
                 "estimator": RandomForestClassifier(labelCol="Survived", featuresCol="features"),
-                "params": {
-                    "numTrees": [50, 100],
-                    "maxDepth": [5, 10]
-                }
+                "params": {"numTrees": [50, 100], "maxDepth": [5, 10]}
             }
         }
 
@@ -135,47 +114,31 @@ def main():
         best_run_id = None
 
         # ---------------------------
-        # Grid Search (apply params via setParams)
+        # Grid Search
         # ---------------------------
         for model_name, cfg in model_candidates.items():
-            print(f"\n Training {model_name}...")
+            print(f"\nTraining {model_name}...")
             base_est = cfg["estimator"]
-            param_grid = cfg["params"]
-            # Cartesian product of params
-            keys, values = zip(*param_grid.items())
+            keys, values = zip(*cfg["params"].items())
             for combo in itertools.product(*values):
                 params = dict(zip(keys, combo))
-
                 try:
                     with mlflow.start_run() as run:
-                        # fresh estimator instance
                         estimator = base_est.copy()
-
-                        # Apply params using setParams (string-name to value)
-                        for k, v in params.items():
-                            try:
-                                # setParams expects keyword args like maxIter=10
-                                estimator = estimator.setParams(**{k: v})
-                            except Exception as e:
-                                # Some params may have different names; warn and skip
-                                print(f" Could not set param {k} for {model_name}: {e}")
-
-                        # Train (data already has 'features' column from preprocess)
+                        estimator = estimator.setParams(**params)
                         fitted = estimator.fit(train)
 
                         # Evaluate
                         preds = fitted.transform(test)
-                        # save confusion matrix artifact
                         y_true = [int(r["Survived"]) for r in preds.select("Survived").collect()]
                         y_pred = [int(r["prediction"]) for r in preds.select("prediction").collect()]
-                        # AUC
                         auc = evaluator.evaluate(preds)
                         acc = accuracy_score(y_true, y_pred)
                         prec = precision_score(y_true, y_pred, zero_division=0)
                         rec = recall_score(y_true, y_pred, zero_division=0)
                         f1 = f1_score(y_true, y_pred, zero_division=0)
 
-                        # Log params/metrics
+                        # Log metrics/params
                         mlflow.log_param("model_type", model_name)
                         for k, v in params.items():
                             mlflow.log_param(k, v)
@@ -185,17 +148,16 @@ def main():
                         mlflow.log_metric("Recall", float(rec))
                         mlflow.log_metric("F1", float(f1))
 
-
+                        # Log confusion matrix
                         with tempfile.TemporaryDirectory() as td:
                             cm_path = os.path.join(td, f"confusion_{model_name}.png")
                             plot_confusion_matrix(y_true, y_pred, cm_path)
                             mlflow.log_artifact(cm_path, artifact_path="confusion_matrices")
 
-                        # Log model (estimator only). To make serving easier, consider logging the full preprocessing+estimator pipeline.
-                        # Here we log the fitted estimator (it expects dataframe with 'features' column).
+                        # Log model
                         mlflow.spark.log_model(fitted, "model")
 
-                        print(f" {model_name} {params} → AUC={auc:.4f}")
+                        print(f"{model_name} {params} → AUC={auc:.4f}")
 
                         # Feature importances / coefficients
                         try:
@@ -248,42 +210,37 @@ def main():
                             best_run_id = run.info.run_id
 
                 except Exception as e:
-                    print(f" Error training {model_name} with {params}: {e}")
+                    print(f"Error training {model_name} with {params}: {e}")
                     traceback.print_exc()
                     continue
 
-        # ---------------------------
         # Save/register best model
-        # ---------------------------
         if best_model and best_run_id:
             try:
-                try:
-                    result = mlflow.register_model(f"runs:/{best_run_id}/model", "TitanicClassifier")
-                    print(f" Best model registered: AUC={best_auc:.4f} (run {best_run_id})")
-                    print(f"   Model version: {result.version}")
-                except Exception as registry_error:
-                    print(f" Model Registry not available: {registry_error}")
-                    # fallback: save locally
-                    model_path = "/home/karthik/mlops-pipeline-ch24m535/models/best_titanic_model"
-                    best_model.write().overwrite().save(model_path)
-                    with open(f"{model_path}_info.txt", "w") as f:
-                        f.write(f"AUC: {best_auc:.4f}\n")
-                        f.write(f"MLflow Run ID: {best_run_id}\n")
-                        f.write(f"Model Path: {model_path}\n")
-                    print(f" Saved best model locally: {model_path}")
-            except Exception as e:
-                print(" Error saving/registering best model:", e)
-                traceback.print_exc()
+                result = mlflow.register_model(f"runs:/{best_run_id}/model", "TitanicClassifier")
+                print(f"Best model registered: AUC={best_auc:.4f} (run {best_run_id}), version {result.version}")
+            except Exception as registry_error:
+                print(f"Model Registry unavailable: {registry_error}")
+                model_path = os.path.join(processed_dir, "best_titanic_model")
+                best_model.write().overwrite().save(model_path)
+                with open(f"{model_path}_info.txt", "w") as f:
+                    f.write(f"AUC: {best_auc:.4f}\nMLflow Run ID: {best_run_id}\nModel Path: {model_path}\n")
+                print(f"Saved best model locally: {model_path}")
         else:
-            print(" No successful models to save/register")
+            print("No successful models to save/register")
 
     except Exception as e:
-        print(" Fatal error:", e)
+        print("Fatal error:", e)
         traceback.print_exc()
     finally:
         if spark:
             spark.stop()
-            print(" Spark session stopped")
+            print("Spark session stopped")
+
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--processed_dir", type=str, required=True, help="Path to processed data directory")
+    args = parser.parse_args()
+    main(args.processed_dir)

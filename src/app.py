@@ -8,12 +8,10 @@ from pydantic import BaseModel
 from pyspark.sql import SparkSession
 from pyspark.ml import PipelineModel
 from mlflow.tracking import MlflowClient
+import argparse
+import os
 
-# -------------------
-# Config paths
-# -------------------
-PREPROCESS_PATH = "/home/karthik/mlops-pipeline-ch24m535/models/preprocess_pipeline"
-STATS_PATH = "/home/karthik/mlops-pipeline-ch24m535/data/processed/impute_stats.json"
+
 
 # -------------------
 # MLflow model loading (latest version of TitanicClassifier)
@@ -41,6 +39,12 @@ print(f"✅ Loading latest model: {MODEL_NAME} v{latest_model.version} (stage={l
 # FastAPI app
 # -------------------
 app = FastAPI(title="Titanic Survival Prediction API")
+
+# -------------------
+# Config paths
+# -------------------
+PREPROCESS_PATH = os.getenv("PROCESSED_DIR", "data/processed") + "/preprocess_pipeline"
+STATS_PATH = processed_dir = os.getenv("PROCESSED_DIR", "data/processed") + "/impute_stats.json"
 
 # Spark session (reused for preprocessing)
 spark = SparkSession.builder.appName("TitanicAPI").getOrCreate()
@@ -83,6 +87,30 @@ def preprocess_input(passenger: Passenger):
     df = preprocess_model.transform(df)
     return df
 
+# -------------------
+# Drift detection helper
+# -------------------
+def detect_drift(data_dict: dict) -> dict:
+    """Check basic drift compared to training stats"""
+    drift_report = {}
+
+    # Numeric drift check
+    for col in ["Age", "Fare"]:
+        val = data_dict.get(col)
+        if val is not None:
+            mean = stats.get(f"{col}_mean")
+            std = stats.get(f"{col}_std", 1e-6)  # avoid div by zero
+            if abs(val - mean) > 3 * std:
+                drift_report[col] = f"⚠️ Value {val} deviates >3σ from training mean {mean:.2f}"
+
+    # Categorical drift check
+    for col in ["Sex", "Embarked"]:
+        val = data_dict.get(col)
+        allowed = stats.get(f"{col}_categories", [])
+        if allowed and val not in allowed:
+            drift_report[col] = f"⚠️ Unexpected category '{val}', not seen in training data"
+
+    return drift_report
 
 # -------------------
 # Routes
@@ -92,15 +120,20 @@ def predict(passenger: Passenger):
     try:
         # Preprocess
         df = preprocess_input(passenger)
+        data_dict = passenger.dict()
 
         # Run prediction
         preds = model.transform(df).select("prediction", "probability").collect()[0]
         prediction = int(preds["prediction"])
         prob_survive = float(preds["probability"][1])  # probability of class 1
+        # Run drift detection
+        drift_report = detect_drift(data_dict)
+
 
         return {
             "survived": prediction,
             "probability_survive": round(prob_survive, 4),
+            "drift_alerts": drift_report if drift_report else "No drift detected"
         }
     except Exception as e:
         return {"error": str(e)}
