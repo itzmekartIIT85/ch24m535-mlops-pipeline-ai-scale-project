@@ -218,6 +218,7 @@ env/
 !data/**/*.dvc
 !data/.gitignore
 data/raw/tintanic.csv
+data/raw/test/csv
 models/
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
