@@ -1,80 +1,111 @@
-"""
-FastAPI Service for Titanic Survival Prediction
-----------------------------------------------
-1. Loads trained Spark Logistic Regression model.
-2. Provides a REST API endpoint (/predict) for predictions.
-3. Accepts passenger features as JSON and returns survival prediction.
-"""
-
+# app.py — FastAPI serving Titanic model with preprocessing pipeline
+import json
+import mlflow
+import numpy as np
+import pandas as pd
 from fastapi import FastAPI
 from pydantic import BaseModel
 from pyspark.sql import SparkSession
-from pyspark.ml.classification import LogisticRegressionModel
-from pyspark.ml.feature import StringIndexerModel, VectorAssembler
 from pyspark.ml import PipelineModel
-from pyspark.sql import Row
+from mlflow.tracking import MlflowClient
 
-# ---------------------------
-# Define request schema
-# ---------------------------
+# -------------------
+# Config paths
+# -------------------
+PREPROCESS_PATH = "/home/karthik/mlops-pipeline-ch24m535/models/preprocess_pipeline"
+STATS_PATH = "/home/karthik/mlops-pipeline-ch24m535/data/processed/impute_stats.json"
+
+# -------------------
+# MLflow model loading (latest version of TitanicClassifier)
+# -------------------
+EXPERIMENT_NAME = "Titanic_Classification"
+MODEL_NAME = "TitanicClassifier"
+
+mlflow.set_tracking_uri("sqlite:///mlflow.db")
+client = MlflowClient()
+
+# Get latest version of model (any stage, highest version number)
+latest_versions = client.get_latest_versions(MODEL_NAME, stages=["None", "Staging", "Production"])
+print(f"Found the {len(latest_versions)} registered versions for model: {MODEL_NAME}")
+if not latest_versions:
+    raise RuntimeError(f"No registered versions found for model: {MODEL_NAME}")
+
+# Sort by version and pick the highest
+latest_model = sorted(latest_versions, key=lambda m: int(m.version))[-1]
+MODEL_URI = f"models:/{MODEL_NAME}/{latest_model.version}"
+
+print(f"✅ Loading latest model: {MODEL_NAME} v{latest_model.version} (stage={latest_model.current_stage})")
+
+
+# -------------------
+# FastAPI app
+# -------------------
+app = FastAPI(title="Titanic Survival Prediction API")
+
+# Spark session (reused for preprocessing)
+spark = SparkSession.builder.appName("TitanicAPI").getOrCreate()
+
+# Load preprocessing pipeline + imputation stats
+preprocess_model = PipelineModel.load(PREPROCESS_PATH)
+with open(STATS_PATH, "r") as f:
+    stats = json.load(f)
+
+# Load trained MLflow model
+model = mlflow.spark.load_model(MODEL_URI)
+
+# -------------------
+# Input Schema (raw features, not encoded)
+# -------------------
 class Passenger(BaseModel):
     Pclass: int
     Sex: str
     Age: float
     Fare: float
-    Embarked: str
+    Embarked: str 
 
-# ---------------------------
-# Initialize FastAPI
-# ---------------------------
-app = FastAPI()
+# -------------------
+# Helper: preprocessing
+# -------------------
+def preprocess_input(passenger: Passenger):
+    """Convert raw JSON → Spark DataFrame → imputation → pipeline transform"""
+    data_dict = passenger.dict()
 
-# ---------------------------
-# Initialize Spark
-# ---------------------------
-spark = SparkSession.builder.appName("TitanicAPI").getOrCreate()
+    # Apply imputation defaults
+    if data_dict.get("Age") is None:
+        data_dict["Age"] = stats["Age_mean"]
+    if data_dict.get("Embarked") is None:
+        data_dict["Embarked"] = stats["Embarked_mode"]
 
-# Load trained model
-model = LogisticRegressionModel.load("/home/karthik/mlops-pipeline-ch24m535/models/titanic_lr")
+    # Convert to Spark DataFrame
+    df = spark.createDataFrame([data_dict])
 
-# NOTE: You should also reload preprocessing pipeline if saved separately
-# For now, we will manually encode categorical features inside API
+    # Apply saved preprocessing pipeline (StringIndexer, Bucketizer, VectorAssembler)
+    df = preprocess_model.transform(df)
+    return df
 
-# ---------------------------
-# Utility: Manual preprocessing
-# (should ideally come from saved preprocessing pipeline)
-# ---------------------------
-def preprocess(passenger: Passenger):
-    # Simple manual encodings (must match training phase)
-    sex_map = {"male": 1.0, "female": 0.0}
-    embarked_map = {"S": 0.0, "C": 1.0, "Q": 2.0}
 
-    return Row(
-        Pclass=passenger.Pclass,
-        Age=passenger.Age,
-        Fare=passenger.Fare,
-        SexIndexed=sex_map.get(passenger.Sex.lower(), 0.0),
-        EmbarkedIndexed=embarked_map.get(passenger.Embarked.upper(), 0.0),
-    )
-
-# ---------------------------
-# API Endpoint
-# ---------------------------
+# -------------------
+# Routes
+# -------------------
 @app.post("/predict")
 def predict(passenger: Passenger):
-    # Convert input into Spark DataFrame
-    row = preprocess(passenger)
-    df = spark.createDataFrame([row])
+    try:
+        # Preprocess
+        df = preprocess_input(passenger)
 
-    # Assemble features
-    assembler = VectorAssembler(
-        inputCols=["Pclass", "Age", "Fare", "SexIndexed", "EmbarkedIndexed"],
-        outputCol="features"
-    )
-    df = assembler.transform(df)
+        # Run prediction
+        preds = model.transform(df).select("prediction", "probability").collect()[0]
+        prediction = int(preds["prediction"])
+        prob_survive = float(preds["probability"][1])  # probability of class 1
 
-    # Predict
-    prediction = model.transform(df).collect()[0]
-    survival = int(prediction.prediction)
+        return {
+            "survived": prediction,
+            "probability_survive": round(prob_survive, 4),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
-    return {"Survived": survival, "Probability": float(prediction.probability[1])}
+
+@app.get("/")
+def healthcheck():
+    return {"status": "ok", "message": "Titanic Survival API running!"}
